@@ -30,10 +30,12 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse, Response
 from sqlalchemy import text
 from sqlalchemy.orm import Session
-from controller.db import SessionLocal, get_db
-from routes.crop_annualburnprobability_to_region_2 import create_region_map
+from routes.crop_annualburnprobability_to_geojson_region import create_region_map
 import concurrent.futures
-from fastapi import Depends
+from fastapi import Depends, Body
+from pydantic import BaseModel
+from typing import List, Dict
+from controller.db import get_db
 
 import sys
 from datetime import datetime
@@ -52,10 +54,7 @@ router = APIRouter(tags=["Utility"], prefix='/Utility')
 
 load_dotenv('fastApi/.env')
 
-# client = OpenAI(api_key=os.environ['openai_api_key'])
-client = None
-
-# County abbreviation to full name mapping
+# Reusing mappings from the original code
 COUNTY_MAPPING = {
     'ALA': 'Alameda', 'ALP': 'Alpine', 'AMA': 'Amador', 'BUT': 'Butte',
     'CAL': 'Calaveras', 'CC': 'Contra Costa', 'COL': 'Colusa', 'DN': 'Del Norte',
@@ -74,7 +73,6 @@ COUNTY_MAPPING = {
     'YOL': 'Yolo', 'YUB': 'Yuba'
 }
 
-# Agency abbreviation to full name mapping
 AGENCY_MAPPING = {
     'CALSTA': 'California State Transportation Agency',
     'CA State Parks': 'California State Parks',
@@ -89,7 +87,6 @@ AGENCY_MAPPING = {
     'US Department of Energy': 'United States Department of Energy'
 }
 
-# Activity category to full name mapping
 ACTIVITY_CAT_MAPPING = {
     'GRAZING': 'Grazing',
     'LAND_PROTEC': 'Land Protection',
@@ -100,7 +97,6 @@ ACTIVITY_CAT_MAPPING = {
     'TREE_PLNTING': 'Tree Planting'
 }
 
-# Activity description to full name mapping
 ACTIVITY_DESC_MAPPING = {
     "AMW_AREA_RESTOR": "Area-Wide Restoration",
     "BIOMASS_REMOVAL": "Biomass Removal",
@@ -161,20 +157,18 @@ ACTIVITY_DESC_MAPPING = {
     'YARDING': 'Yarding'
 }
 
-# Vegetation type to full name mapping
 VEGETATION_MAPPING = {
     'AGRICULTURE': 'Agricultural Land',
     'FOREST': 'Forest Land',
     'GRASS_HERB': 'Grassland/Herbaceous',
     'SHRB_CHAP': 'Shrub/Chaparral',
-  'SPARSE': 'Sparse Vegetation',
+    'SPARSE': 'Sparse Vegetation',
     'Trees Removed': 'Trees Removed',
     'URBAN': 'Urban/Developed',
     'WATER': 'Water',
     'WETLAND': 'Wetland'
 }
 
-# Ownership group to full name mapping
 OWNERSHIP_MAPPING = {
     'FEDERAL': 'Federal Government',
     'LOCAL': 'Local Government',
@@ -185,7 +179,6 @@ OWNERSHIP_MAPPING = {
     'TRIBAL': 'Tribal Land'
 }
 
-# Region to full name mapping
 REGION_MAPPING = {
     'CENTRAL_COAST': 'Central Coast',
     'NORTH_COAST': 'North Coast',
@@ -194,7 +187,6 @@ REGION_MAPPING = {
     'Non-Spatial Data': 'Non-Spatial Data'
 }
 
-# Activity status to full name mapping
 STATUS_MAPPING = {
     'ACTIVE': 'Active',
     'CANCELLED': 'Cancelled',
@@ -202,7 +194,6 @@ STATUS_MAPPING = {
     'PLANNED': 'Planned'
 }
 
-# Administering organization to full name mapping
 ADMIN_ORG_MAPPING = {
     'BIA': 'Bureau of Indian Affairs',
     'BLM': 'Bureau of Land Management',
@@ -230,16 +221,28 @@ ADMIN_ORG_MAPPING = {
     'WCB': 'Wildlife Conservation Board'
 }
 
-BOUNDARY_DATASET_TABLE_MAPPING = {
-    'California Counties': ('boundary.ca_counties', 'namelsad'),
-    'California Local Fire Districts': ('boundary.california_local_fire_districts', 'name'),
-    "Regional Resource Kit Boundaries": ('boundary.rrk_boundaries', 'rrk_region'),
-    "BLM CA Administrative Unit Boundary Field Office Polygon": ('boundary.blm_ca_administrative_unit_boundary_field_office_polygon', 'admu_name'),
-    'Administrative Forest Boundaries': ('boundary.forest_administrative_boundaries', 'forestname'),
-    'CAL FIRE Operational Units': ('boundary.cal_fire_operational_units', 'unit'),
-    'California State Senate Districts': ('boundary.california_state_senate_districts_map_2020', 'name'),
-    'California Assembly Districts': ('boundary.assembly_districts', 'assemblydi')
-}
+class BackgroundLayer(BaseModel):
+    layer_name: str
+    layer_title: str
+    min_value: float
+    max_value: float
+    min_value_color: str
+    max_value_color: str
+
+class RegionReportRequest(BaseModel):
+    geojson_str: str
+    region_name: str
+    output_format: str = 'html'
+    background_layers: List[BackgroundLayer] = [
+        BackgroundLayer(
+            layer_name="rrk:annualburnprobability_202212_202406_t1_v5",
+            layer_title="Annual Burn Probability",
+            min_value=0.01,
+            max_value=0.1,
+            min_value_color="#ffffb2",
+            max_value_color="#bd0026"
+        )
+    ]
 
 def create_db_connection():
     try:
@@ -250,42 +253,55 @@ def create_db_connection():
         logger.error(f"Error connecting to database: {e}")
         return None
 
-def get_region_data(db: Session, table_name: str, column_name: str, region_name: str):
-    """Retrieve treatment data for a region from any PostGIS table"""
+def get_region_data_from_geojson(db: Session, geojson_str: str, region_name: str):
+    """Retrieve treatment data for a region defined by a GeoJSON string"""
     try:
+        # Parse GeoJSON string
+        geojson_data = json.loads(geojson_str)
+        gdf = gpd.GeoDataFrame.from_features(geojson_data, crs="EPSG:4326")
+        
+        if gdf.empty:
+            raise ValueError("GeoJSON contains no valid geometries")
+        
+        # Convert to EPSG:4269 for PostGIS compatibility
+        gdf_4269 = gdf.to_crs("EPSG:4269")
+        
+        # Combine all geometries into a single geometry
+        region_geom = gdf_4269.geometry.unary_union
+        
+        # Convert geometry to WKT for SQL query
+        region_wkt = region_geom.wkt
+        
         # Get treatment data intersecting with the region geometry
         data_query = f"""
            WITH region_geom AS (
-                    SELECT ST_Transform(geom, 4269) AS geom
-                    FROM {table_name}
-                   WHERE {column_name} = '{region_name}'
-                ),
-                bbox AS (
-                     SELECT ST_SetSRID(ST_Extent(geom), 4269)::geometry AS geom
-                     FROM region_geom
-                )
-            SELECT its.*,
-                   ST_X(ST_Transform(its.geom, 4326)) as x,
-                   ST_Y(ST_Transform(its.geom, 4326)) as y
-            FROM its.activities_report_20250110 AS its,
-                 bbox,
-                 region_geom
-            WHERE ST_Within(its.geom, bbox.geom)
-              AND st_contains(region_geom.geom, its.geom)
-              AND year_txt ~ '^[0-9]+$'
-              AND CAST(year_txt AS INTEGER) BETWEEN 2021 AND 2023
-            """
+                SELECT ST_SetSRID(ST_GeomFromText('{region_wkt}'), 4269) AS geom
+           ),
+           bbox AS (
+                SELECT ST_SetSRID(ST_Extent(geom), 4269)::geometry AS geom
+                FROM region_geom
+           )
+           SELECT its.*,
+                  ST_X(ST_Transform(its.geom, 4326)) as x,
+                  ST_Y(ST_Transform(its.geom, 4326)) as y
+           FROM its.activities_report_20250110 AS its,
+                bbox,
+                region_geom
+           WHERE ST_Within(its.geom, bbox.geom)
+             AND ST_Contains(region_geom.geom, its.geom)
+             AND year_txt ~ '^[0-9]+$'
+             AND CAST(year_txt AS INTEGER) BETWEEN 2021 AND 2023
+        """
 
-        print("-"*70)
-        print(data_query)
+        # debug_print(data_query)
 
         with db.bind.connect() as conn:
             df = pd.read_sql_query(text(data_query), conn)
-        return df
+        return df, gdf_4269
 
     except Exception as e:
-        logger.error(f"Error fetching region data: {str(e)}")
-        return pd.DataFrame()
+        logger.error(f"Error fetching region data from GeoJSON: {str(e)}")
+        return pd.DataFrame(), None
 
 def plot_to_base64(plt_figure):
     buf = io.BytesIO()
@@ -329,7 +345,7 @@ def create_activity_cat_chart(df):
     df["activity_cat_name"] = df["activity_cat"].map(ACTIVITY_CAT_MAPPING).fillna(df["activity_cat"])
     activity_year_acres = df[df['activity_uom'] == 'AC'].groupby(["year_txt", "activity_cat_name"])['activity_quantity'].sum().unstack(fill_value=0)
     activity_year_acres = activity_year_acres.clip(upper=np.percentile(activity_year_acres, 95))
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=(14, 6))
     activity_year_acres.plot(kind="bar", ax=ax, width=0.8, colormap="coolwarm")
     ax.set_title("Treatment Acres by Category (2021-2023)", fontsize=14, fontweight="bold", pad=20)
     adjust_chart_scaling(ax, activity_year_acres)
@@ -344,7 +360,7 @@ def create_vegetation_chart(df):
     df["vegetation_name"] = df["broad_vegetation_type"].map(VEGETATION_MAPPING).fillna(df["broad_vegetation_type"])
     veg_year_acres = df[df['activity_uom'] == 'AC'].groupby(["year_txt", "vegetation_name"])['activity_quantity'].sum().unstack(fill_value=0)
     veg_year_acres = veg_year_acres.clip(upper=np.percentile(veg_year_acres, 95))
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=(14, 6))
     veg_year_acres.plot(kind="bar", ax=ax, width=0.8, colormap="coolwarm")
     ax.set_title("Treatment Acres by Vegetation Type (2021-2023)", fontsize=14, fontweight="bold", pad=20)
     adjust_chart_scaling(ax, veg_year_acres)
@@ -359,7 +375,7 @@ def create_ownership_chart(df):
     df["ownership_name"] = df["primary_ownership_group"].map(OWNERSHIP_MAPPING).fillna(df["primary_ownership_group"])
     ownership_year_acres = df[df['activity_uom'] == 'AC'].groupby(["year_txt", "ownership_name"])['activity_quantity'].sum().unstack(fill_value=0)
     ownership_year_acres = ownership_year_acres.clip(upper=np.percentile(ownership_year_acres, 95))
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=(14, 6))
     ownership_year_acres.plot(kind="bar", ax=ax, width=0.8, colormap="coolwarm")
     ax.set_title("Treatment Acres by Land Ownership (2021-2023)", fontsize=14, fontweight="bold", pad=20)
     adjust_chart_scaling(ax, ownership_year_acres)
@@ -374,7 +390,7 @@ def create_status_chart(df):
     df["status_name"] = df["activity_status"].map(STATUS_MAPPING).fillna(df["activity_status"])
     status_year_acres = df[df['activity_uom'] == 'AC'].groupby(["year_txt", "status_name"])['activity_quantity'].sum().unstack(fill_value=0)
     status_year_acres = status_year_acres.clip(upper=np.percentile(status_year_acres, 95))
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=(14, 6))
     status_year_acres.plot(kind="bar", stacked=True, ax=ax, width=0.8, colormap="coolwarm")
     ax.set_title("Treatment Acres by Status (2021-2023)", fontsize=14, fontweight="bold", pad=20)
     adjust_chart_scaling(ax, status_year_acres)
@@ -481,7 +497,6 @@ def extract_data_insights(df, region_name):
     return insights
 
 def create_admin_org_table(df):
-    """Create styled table for administering org data using activity categories"""
     admin_df = df[df['activity_uom'] == 'AC'].groupby(
         ['administering_org', 'activity_cat', 'year_txt']
     )['activity_quantity'].sum().reset_index()
@@ -496,7 +511,6 @@ def create_admin_org_table(df):
         .to_html(index=False, classes='table table-striped table-hover', border=0)
 
 def create_ownership_table(df):
-    """Create styled table for ownership data using activity categories"""
     ownership_df = df[df['activity_uom'] == 'AC'].groupby(
         ['primary_ownership_group', 'activity_cat', 'year_txt']
     )['activity_quantity'].sum().reset_index()
@@ -510,10 +524,11 @@ def create_ownership_table(df):
         .sort_values(['Year', 'Ownership']) \
         .to_html(index=False, classes='table table-striped table-hover', border=0)
 
-def generate_excel_data(df, region_name):
-    """Generate Excel data with proper multi-column sorting"""
-    from openpyxl.utils import get_column_letter
 
+from openpyxl.utils import get_column_letter
+
+def generate_excel_data(df, region_name):
+    """Generate Excel data with a single sheet containing specified columns"""
     output = BytesIO()
 
     with pd.ExcelWriter(output, engine='openpyxl') as writer:
@@ -532,76 +547,87 @@ def generate_excel_data(df, region_name):
                 adjusted_width = (max_length + 2) * 1.2
                 worksheet.column_dimensions[column_letter].width = adjusted_width
 
-        # 1. Administering Organizations (sorted: Org → Category → Year)
-        admin_df = df[df['activity_uom'] == 'AC'].groupby(
-            ['administering_org', 'activity_cat', 'year_txt']
-        )['activity_quantity'].sum().reset_index()
+        # Create single sheet with all requested columns
+        report_df = df[df['activity_uom'] == 'AC'].groupby(
+            ['administering_org', 'primary_ownership_group', 'activity_cat', 'activity_description', 'year_txt']
+        ).agg({
+            'activity_quantity': 'sum',
+            'activity_description': 'count'  # Count of activities
+        }).rename(columns={'activity_description': 'activity_count'}).reset_index()
 
-        admin_df['Administering Organization'] = admin_df['administering_org'].map(ADMIN_ORG_MAPPING)
-        admin_df['Activity Category'] = admin_df['activity_cat'].map(ACTIVITY_CAT_MAPPING)
-        admin_df['Year'] = admin_df['year_txt'].astype(int)
-        admin_df['Acres'] = admin_df['activity_quantity']
+        report_df['Administering Organization'] = report_df['administering_org'].map(ADMIN_ORG_MAPPING)
+        report_df['Ownership'] = report_df['primary_ownership_group'].map(OWNERSHIP_MAPPING)
+        report_df['Activity Category'] = report_df['activity_cat'].map(ACTIVITY_CAT_MAPPING)
+        report_df['Activity Description'] = report_df['activity_description'].map(ACTIVITY_DESC_MAPPING)
+        report_df['Number of Activities'] = report_df['activity_count']
+        report_df['Year'] = report_df['year_txt'].astype(int)
+        report_df['Acres'] = report_df['activity_quantity']
 
-        admin_df = admin_df[['Administering Organization', 'Activity Category', 'Year', 'Acres']] \
-            .sort_values(['Administering Organization', 'Activity Category', 'Year'])
+        report_df = report_df[[
+            'Administering Organization',
+            'Ownership',
+            'Activity Category',
+            'Activity Description',
+            'Number of Activities',
+            'Year',
+            'Acres'
+        ]].sort_values(['Administering Organization', 'Ownership', 'Activity Category', 'Activity Description', 'Year'])
 
-        admin_df.to_excel(writer, sheet_name='Administering Organizations', index=False)
-        auto_adjust_columns(writer.sheets['Administering Organizations'])
-
-        # 2. Land Ownership (sorted: Ownership → Category → Year)
-        ownership_df = df[df['activity_uom'] == 'AC'].groupby(
-            ['primary_ownership_group', 'activity_cat', 'year_txt']
-        )['activity_quantity'].sum().reset_index()
-
-        ownership_df['Ownership'] = ownership_df['primary_ownership_group'].map(OWNERSHIP_MAPPING)
-        ownership_df['Activity Category'] = ownership_df['activity_cat'].map(ACTIVITY_CAT_MAPPING)
-        ownership_df['Year'] = ownership_df['year_txt'].astype(int)
-        ownership_df['Acres'] = ownership_df['activity_quantity']
-
-        ownership_df = ownership_df[['Ownership', 'Activity Category', 'Year', 'Acres']] \
-            .sort_values(['Ownership', 'Activity Category', 'Year'])
-
-        ownership_df.to_excel(writer, sheet_name='Land Ownership', index=False)
-        auto_adjust_columns(writer.sheets['Land Ownership'])
+        report_df.to_excel(writer, sheet_name='Treatment Report', index=False)
+        auto_adjust_columns(writer.sheets['Treatment Report'])
 
         # Format numeric columns
-        for sheet in writer.sheets.values():
-            for row in sheet.iter_rows(min_row=2):
-                for cell in row:
-                    if cell.column == 4:  # Acres column
-                        cell.number_format = '#,##0.00'
-                    elif cell.column == 3:  # Year column
-                        cell.number_format = '0'
+        worksheet = writer.sheets['Treatment Report']
+        for row in worksheet.iter_rows(min_row=2):
+            for cell in row:
+                if cell.column == 7:  # Acres column
+                    cell.number_format = '#,##0.00'
+                elif cell.column == 6:  # Year column
+                    cell.number_format = '0'
+                elif cell.column == 5:  # Number of Activities column
+                    cell.number_format = '0'
+
+        writer.book.active = 0
 
     output.seek(0)
     return output
 
-@router.get("/its_region_report_2", include_in_schema=True)
-def create_region_report(
-    boundary_dataset_name: str,
-    region_name: str,
-    output_format: str = 'html',
-    layer_name: str = "rrk:annualburnprobability_202212_202406_t1_v5",
-    layer_title: str = "Annual Burn Probability",
-    min_value: float = 0.01,
-    max_value: float = 0.1,
-    min_value_color: str = '#ffffb2',  # '#FFFFE0',
-    max_value_color: str = '#bd0026',  # '#8B0000',
+@router.post("/its_geojson_region_report", include_in_schema=True)
+def create_geojson_region_report(
+    request: RegionReportRequest = Body(...),
     db: Session = Depends(get_db)
 ):
-    if boundary_dataset_name in BOUNDARY_DATASET_TABLE_MAPPING.keys():
-        table_name = BOUNDARY_DATASET_TABLE_MAPPING[boundary_dataset_name][0]
-        column_name = BOUNDARY_DATASET_TABLE_MAPPING[boundary_dataset_name][1]
-    else:
-        raise HTTPException(status_code=404,
-                            detail=f"No boundary dataset with the name {boundary_dataset_name}")
+    # Extract parameters from the request body
+    geojson_str = request.geojson_str
+    region_name = request.region_name
+    output_format = request.output_format
+    background_layers = [layer.dict() for layer in request.background_layers] if request.background_layers else []
+
+    # Parse and validate GeoJSON
+    try:
+        geojson_data = json.loads(geojson_str)
+        gdf = gpd.GeoDataFrame.from_features(geojson_data, crs="EPSG:4326")
+        if gdf.empty:
+            raise ValueError("GeoJSON contains no valid geometries")
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid GeoJSON format")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # Validate background layers (already validated by Pydantic, but kept for consistency)
+    try:
+        for layer in background_layers:
+            BackgroundLayer(**layer)  # Validate each layer
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Invalid background_layers format: {str(e)}")
 
     # Get treatment data
-    debug_print("Getting region points")
-    df = get_region_data(db, table_name, column_name, region_name)
+    debug_print("Getting region points from GeoJSON")
+    df, region_gdf = get_region_data_from_geojson(db, geojson_str, region_name)
     if df.empty:
         raise HTTPException(status_code=404,
-                            detail=f"No treatment data found for {region_name} in {boundary_dataset_name}")
+                           detail=f"No treatment data found for the provided region")
+
     debug_print(f"Got region points: {df.shape}")
 
     # Add Excel output handling
@@ -624,42 +650,71 @@ def create_region_report(
         summary = generate_summary_statistics(df, region_name)
         activity_table = create_activity_description_table(df)
 
-        # Generate region map
-        try:
-            debug_print(f"Generating overlay_map")
-
-            # layer_name='rrk:probfireseveritymod_202208_202406_t1_v5'
-            # layer_title='Probability Fire Severity'
-            # min_value=0
-            # max_value=1                                                                                                                             
-            # min_value_color='#ddf2f3'                                                                                                                 
-            # max_value_color='#0b7734'  
-
-            overlay_map = create_region_map(
-                db=db,
-                points_df=df,
-                table_name=table_name,
-                column_name=column_name,
-                region_name=region_name,
-                geoserver_url="https://sparcal.sdsc.edu/geoserver",
-                layer_name=layer_name,
-                layer_title=layer_title,
-                min_value=min_value,
-                max_value=max_value,
-                min_value_color=min_value_color,
-                max_value_color=max_value_color,
-            )
-            debug_print(f"Generated: overlay_map")
-        except Exception as e:
-            traceback.print_exc()
-            logger.error(f"Map generation error: {str(e)}")
-            overlay_map = None
+        # Generate region maps for each background layer, or a default map if no layers are provided
+        overlay_maps = []
+        if not background_layers:
+            # Generate a default map with just the base layer and points
+            try:
+                debug_print("Generating default map with no WMS layer")
+                default_map = create_region_map(
+                    db=db,
+                    points_df=df,
+                    region_name=region_name,
+                    geoserver_url="https://sparcal.sdsc.edu/geoserver",
+                    layer_name=None,  # No WMS layer
+                    layer_title="Treatment Locations",
+                    region_gdf=region_gdf
+                )
+                overlay_maps.append({
+                    'image': default_map,
+                    'title': "Treatment Locations"
+                })
+                debug_print("Generated default map")
+            except Exception as e:
+                traceback.print_exc()
+                logger.error(f"Default map generation error: {str(e)}")
+                overlay_maps.append({
+                    'image': None,
+                    'title': "Treatment Locations"
+                })
+        else:
+            # Generate maps for provided background layers
+            for layer in background_layers:
+                try:
+                    debug_print(f"Generating overlay_map for {layer['layer_title']}")
+                    overlay_map = create_region_map(
+                        db=db,
+                        points_df=df,
+                        table_name=None,
+                        column_name=None,
+                        region_name=region_name,
+                        geoserver_url="https://sparcal.sdsc.edu/geoserver",
+                        layer_name=layer['layer_name'],
+                        layer_title=layer['layer_title'],
+                        min_value=layer['min_value'],
+                        max_value=layer['max_value'],
+                        min_value_color=layer['min_value_color'],
+                        max_value_color=layer['max_value_color'],
+                        region_gdf=region_gdf
+                    )
+                    overlay_maps.append({
+                        'image': overlay_map,
+                        'title': layer['layer_title']
+                    })
+                    debug_print(f"Generated overlay_map for {layer['layer_title']}")
+                except Exception as e:
+                    traceback.print_exc()
+                    logger.error(f"Map generation error for {layer['layer_title']}: {str(e)}")
+                    overlay_maps.append({
+                        'image': None,
+                        'title': layer['layer_title']
+                    })
 
         logger.info("Generating spreadsheet tables")
         admin_table = create_admin_org_table(df)
         ownership_table = create_ownership_table(df)
 
-        # Generate HTML template
+        # Generate HTML template (same as original)
         html_template = Template('''
 <!DOCTYPE html>
 <html>
@@ -716,7 +771,7 @@ def create_region_report(
         .header {
             background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
             color: var(--light-text);
-            padding: 3rem;
+            padding: 2rem;
             margin-bottom: 2rem;
             text-align: center;
             position: relative;
@@ -915,39 +970,33 @@ def create_region_report(
             table {
                 box-shadow: none;
             }
-            /* Chart sizing adjustments */
             .chart img {
                 max-height: 320px !important;
                 width: auto !important;
                 margin: 12px auto !important;
                 page-break-inside: avoid;
             }
-            /* Container adjustments */
             .chart {
                 page-break-inside: avoid;
                 margin: 8px 0 !important;
                 padding: 4px !important;
             }
-            /* Grid layout for charts */
             .chart-row {
                 display: grid !important;
                 grid-template-columns: 1fr 1fr;
                 gap: 8px !important;
                 page-break-inside: avoid;
             }
-            /* Single chart full width */
             .full-width.chart img {
                 max-height: 400px !important;
                 width: 95% !important;
             }
         }
-        /* Chart image quality preservation */
         .chart img {
             image-rendering: crisp-edges;
             -webkit-print-color-adjust: exact;
             print-color-adjust: exact;
         }
-        /* PDF-specific image scaling */
         @media print {
             canvas {
                 max-width: 100% !important;
@@ -963,12 +1012,12 @@ def create_region_report(
 <body>
     <div class="container">
         <div class="header">
-            <p>Wildfire & Landscape Resilience Task Force</p>
+            <p>Wildfire & Forest Resilience Task Force</p>
             <h2>Interagency Treatment Summary Report</h2>
             <p>
                 <span style="font-size:16pt; font-weight: bold;">{{ summary.region_name }}</span>
                 <br/>
-                {{ boundary_dataset_name }}
+                Custom Region
             </p>
         </div>
 
@@ -994,20 +1043,24 @@ def create_region_report(
 
         <div class="section">
             <div class="chart-container">
-               <div class="chart-row">
+                {% for map in overlay_maps %}
+                <div class="chart-row">
                     <div class="chart full-width">
-                        <h3>Treatment Locations and {{ layer_title }}</h3>
-                        {% if overlay_map %}
-                            <img src="data:image/png;base64,{{ overlay_map }}" alt="{{ layer_title }} Overlay">
+                        <h3>Treatment Locations{% if map.title != "Treatment Locations" %} and {{ map.title }}{% endif %}</h3>
+                        {% if map.image %}
+                            <img src="data:image/png;base64,{{ map.image }}" alt="{{ map.title }} Overlay">
                         {% else %}
-                            <p>Overlay map could not be generated.</p>
+                            <p>Overlay map for {{ map.title }} could not be generated.</p>
                         {% endif %}
-                        <p class="table-description" style="text-align: center;">
-                            {{ layer_title }} - <a href="https://caregionalresourcekits.org/clm.html" target="_blank">California Landscape Metrics</a>, 2025
-                        </p>
-                   </div>
+                        {% if map.title != "Treatment Locations" %}
+                            <p class="table-description" style="text-align: center;">
+                                {{ map.title }} - <a href="https://caregionalresourcekits.org/clm.html" target="_blank">California Landscape Metrics</a>
+                            </p>
+                        {% endif %}
+                    </div>
                 </div>
-             </div>
+                {% endfor %}
+            </div>
         </div>
 
         <div class="section">
@@ -1017,24 +1070,27 @@ def create_region_report(
                     <div class="chart">
                         <h3>Treatment Categories Distribution</h3>
                         <img src="data:image/png;base64,{{ activity_cat_chart }}" alt="Treatment Categories">
-                        <p class="chart-caption">Breakdown of treatment activities by category across 2021-2023.</p>
                     </div>
+                </div>
+
+                <div class="chart-row"> 
                     <div class="chart">
                         <h3>Vegetation Types Treated</h3>
                         <img src="data:image/png;base64,{{ vegetation_chart }}" alt="Vegetation Types Treated">
-                        <p class="chart-caption">Distribution of treatments across vegetation types, 2021-2023.</p>
                     </div>
                 </div>
+
                 <div class="chart-row">
                     <div class="chart">
                         <h3>Land Ownership Distribution</h3>
                         <img src="data:image/png;base64,{{ ownership_chart }}" alt="Land Ownership">
-                        <p class="chart-caption">Treatment distribution by land ownership, 2021-2023.</p>
                     </div>
+                </div>
+
+                <div class="chart-row">
                     <div class="chart">
                         <h3>Top Administering Organizations</h3>
                         <img src="data:image/png;base64,{{ admin_org_chart }}" alt="Top Administering Organizations">
-                        <p class="chart-caption">Top 10 organizations administering treatments, 2021-2023.</p>
                     </div>
                 </div>
             </div>
@@ -1057,7 +1113,7 @@ def create_region_report(
         </div>
 
         <div class="footer">
-            <p><strong>California Wildfire and Landscape Interagency Treatment Dashboard</strong></p>
+            <p><strong>California Wildfire and Forest Interagency Treatment Dashboard</strong></p>
             <p>Report Generated: {{ current_date }}</p>
         </div>
     </div>
@@ -1067,16 +1123,15 @@ def create_region_report(
 
         # Render HTML
         html_content = html_template.render(
-            boundary_dataset_name=boundary_dataset_name,
+            boundary_dataset_name="Custom Region",
             summary=summary,
-            overlay_map=overlay_map,
+            overlay_maps=overlay_maps,
             activity_cat_chart=activity_cat_chart,
             vegetation_chart=vegetation_chart,
             ownership_chart=ownership_chart,
             admin_org_chart=admin_org_chart,
             admin_table=admin_table,
             ownership_table=ownership_table,
-            layer_title=layer_title,
             current_date=datetime.now().strftime('%B %d, %Y')
         )
 
