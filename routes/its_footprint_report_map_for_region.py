@@ -5,6 +5,7 @@ import requests
 import numpy as np
 import pandas as pd
 import io
+import time
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from sqlalchemy import create_engine
@@ -27,6 +28,10 @@ from shapely.geometry import MultiPolygon, Polygon
 from rasterio.merge import merge
 import os
 import tempfile
+from dotenv.main import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 def debug_print(msg):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
@@ -145,7 +150,7 @@ def get_scatter_points(db: Session, table_name, column_name, region_name, region
                 its.year_txt
             FROM its.activities_report_20250110 AS its, bbox, region_geom
             WHERE ST_Intersects(its.geom, bbox.geom)
-              AND ST_Contains(region_geom.geom, its.geom)
+              AND ST_Contains(regionBearer.geom, its.geom)
               AND year_txt ~ '^[0-9]+$'
               AND CAST(year_txt AS INTEGER) BETWEEN 2021 AND 2023;
         """
@@ -248,6 +253,8 @@ def create_region_map(db: Session, table_name: str, column_name: str, region_nam
     if any(param is not None for param in [min_value, max_value, min_value_color, max_value_color]):
         warnings.warn("Parameters min_value, max_value, min_value_color, and max_value_color are deprecated and unused in create_region_map.", DeprecationWarning)
         debug_print("Warning: Deprecated parameters min_value, max_value, min_value_color, or max_value_color provided.")
+
+    time.sleep(11)
 
     # Override geoserver_url to ensure correct WMS endpoint
     geoserver_url = "https://sparcal.sdsc.edu/geoserver/rrk"
@@ -391,35 +398,41 @@ def create_region_map(db: Session, table_name: str, column_name: str, region_nam
     ax.set_xlim(min_lon, max_lon)
     ax.set_ylim(min_lat, max_lat)
 
-    # Add MapTiler Positron basemap
+    # Add MapTiler Positron basemap with validation
+    MAPTILER_API_KEY = os.getenv('MAPTILER_API_KEY', '')
+    MAPTILER_URL = f'https://api.maptiler.com/maps/positron/{{z}}/{{x}}/{{y}}.png?key={MAPTILER_API_KEY}'
     try:
-        debug_print(f"Adding MapTiler Positron basemap with bounds: ({min_lon}, {min_lat}, {max_lon}, {max_lat})")
+        debug_print(f"Testing MapTiler API with bounds: ({min_lon}, {min_lat}, {max_lon}, {max_lat})")
+        test_url = f'https://api.maptiler.com/maps/positron/10/0/0.png?key={MAPTILER_API_KEY}'
+        response = requests.head(test_url, timeout=5)
+        if response.status_code != 200:
+            debug_print(f"MapTiler API test failed with status code {response.status_code}, using fallback basemap")
+            raise Exception(f"MapTiler API test failed: status code {response.status_code}")
+        debug_print(f"Adding MapTiler Positron basemap with URL: {MAPTILER_URL}")
         ctx.add_basemap(
             ax,
             crs="EPSG:4326",
-            source='https://api.maptiler.com/maps/positron/{z}/{x}/{y}.png?key=' + os.environ.get('MAPTILER_API_KEY', ''),
-            zoom=10,
+            source=MAPTILER_URL,
+            zoom='auto',  # Use automatic zoom to avoid tile calculation issues
             attribution="© OpenMapTiles © OpenStreetMap contributors",
             zorder=1
         )
         debug_print("MapTiler Positron basemap added successfully")
     except Exception as e:
-        debug_print(f"Error adding MapTiler Positron basemap: {str(e)}")
+        debug_print(f"Warning: Failed to add MapTiler Positron basemap: {str(e)}. Falling back to OpenStreetMap.")
         try:
-            debug_print("Attempting fallback basemap provider (OpenStreetMap)...")
             ctx.add_basemap(
                 ax,
                 crs="EPSG:4326",
                 source=ctx.providers.OpenStreetMap.Mapnik,
-                zoom=10,
+                zoom='auto',  # Use automatic zoom for consistency
                 attribution="(C) OpenStreetMap contributors",
                 zorder=1
             )
-            debug_print("Fallback basemap added successfully")
+            debug_print("OpenStreetMap basemap added successfully")
         except Exception as e2:
-            debug_print(f"Error adding fallback basemap: {str(e2)}")
+            debug_print(f"Error adding OpenStreetMap basemap: {str(e2)}. Using fallback light blue background")
             ax.set_facecolor('lightblue')
-            debug_print("Using fallback light blue background")
 
     # Add WMS layer
     if layer_name:
@@ -710,7 +723,7 @@ def create_region_map(db: Session, table_name: str, column_name: str, region_nam
                     color=year_colors[year],
                     s=point_size,
                     alpha=point_alpha,
-                    label=f'{year} Activities',
+                    label=f'{year} Footprints',
                     marker='o',
                     edgecolor='white',
                     linewidth=0.2,
@@ -723,7 +736,7 @@ def create_region_map(db: Session, table_name: str, column_name: str, region_nam
             color=point_color,
             s=point_size,
             alpha=point_alpha,
-            label='Activities',
+            label='Footprints',
             marker='o',
             edgecolor='white',
             linewidth=0.2,

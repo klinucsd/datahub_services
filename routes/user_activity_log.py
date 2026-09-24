@@ -29,7 +29,7 @@ class UserActivityLog(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(Integer, nullable=False)
     action_type = Column(String(100), nullable=False)
-    action_target = Column(String(512))
+    action_target = Column(String(512), nullable=False)
     action_detail = Column(JSON)
     ip_address = Column(String(45))
     user_agent = Column(Text)
@@ -73,9 +73,9 @@ async def log_activity(request: Request,
         db.commit()
         
         logger.info(f"Activity logged for user {user.user_id}: {user_activity.action_type}")
-        return {"status": "success", "user_id": user.user_id}
+        return {"status": "success"}
     except Exception as e:
         logger.error(f"Error logging activity: {e}")
         logger.error(traceback.format_exc())
         db.rollback()
-        raise HTTPException(status_code=500, detail="Failed to log activity")
+        raise HTTPException(status_code=500, detail=f"Failed to log activity: str(e)")

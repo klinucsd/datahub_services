@@ -15,7 +15,8 @@ from dotenv.main import load_dotenv
 load_dotenv('fastapi/.env')
 
 engine = create_engine(
-    "postgresql+psycopg2://" + os.environ['db_user'] + ':' + os.environ['db_password'] + '@' + os.environ['base_host'] + "/" + os.environ['db_name'],
+    # "postgresql+psycopg2://" + os.environ['db_user'] + ':' + os.environ['db_password'] + '@' + os.environ['base_host'] + "/" + os.environ['db_name'],
+    os.environ['database_connection'],	
     echo=False,
     max_overflow=50,
 )

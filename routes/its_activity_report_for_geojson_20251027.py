@@ -30,7 +30,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse, Response
 from sqlalchemy import text
 from sqlalchemy.orm import Session
-from routes.crop_annualburnprobability_to_geojson_region import create_region_map
+from routes.its_activity_report_map_for_geojson_20251027 import create_region_map
 import concurrent.futures
 from fastapi import Depends, Body
 from pydantic import BaseModel
@@ -284,13 +284,13 @@ def get_region_data_from_geojson(db: Session, geojson_str: str, region_name: str
            SELECT its.*,
                   ST_X(ST_Transform(its.geom, 4326)) as x,
                   ST_Y(ST_Transform(its.geom, 4326)) as y
-           FROM its.activities_report_20250110 AS its,
+           FROM its.activity_report20251027 AS its,
                 bbox,
                 region_geom
            WHERE ST_Within(its.geom, bbox.geom)
              AND ST_Contains(region_geom.geom, its.geom)
              AND year_txt ~ '^[0-9]+$'
-             AND CAST(year_txt AS INTEGER) BETWEEN 2021 AND 2023
+             AND CAST(year_txt AS INTEGER) BETWEEN 2021 AND 2024
         """
 
         # debug_print(data_query)
@@ -332,7 +332,7 @@ def create_agency_chart(df):
     agency_year_acres = agency_year_acres.clip(upper=np.percentile(agency_year_acres, 95))
     fig, ax = plt.subplots(figsize=(12, 6))
     agency_year_acres.plot(kind="bar", ax=ax, width=0.8, colormap="coolwarm")
-    ax.set_title("Treatment Acres by Agency (2021-2023)", fontsize=14, fontweight="bold", pad=20)
+    ax.set_title("Treatment Acres by Agency (2021-2024)", fontsize=14, fontweight="bold", pad=20)
     adjust_chart_scaling(ax, agency_year_acres)
     ax.set_xlabel("Year", fontsize=12)
     ax.legend(title="Agency", bbox_to_anchor=(1.05, 1), loc="upper left")
@@ -347,7 +347,7 @@ def create_activity_cat_chart(df):
     activity_year_acres = activity_year_acres.clip(upper=np.percentile(activity_year_acres, 95))
     fig, ax = plt.subplots(figsize=(14, 6))
     activity_year_acres.plot(kind="bar", ax=ax, width=0.8, colormap="coolwarm")
-    ax.set_title("Treatment Acres by Category (2021-2023)", fontsize=14, fontweight="bold", pad=20)
+    ax.set_title("Treatment Acres by Category (2021-2024)", fontsize=14, fontweight="bold", pad=20)
     adjust_chart_scaling(ax, activity_year_acres)
     ax.set_xlabel("Year", fontsize=12)
     ax.legend(title="Category", bbox_to_anchor=(1.05, 1), loc="upper left")
@@ -362,7 +362,7 @@ def create_vegetation_chart(df):
     veg_year_acres = veg_year_acres.clip(upper=np.percentile(veg_year_acres, 95))
     fig, ax = plt.subplots(figsize=(14, 6))
     veg_year_acres.plot(kind="bar", ax=ax, width=0.8, colormap="coolwarm")
-    ax.set_title("Treatment Acres by Vegetation Type (2021-2023)", fontsize=14, fontweight="bold", pad=20)
+    ax.set_title("Treatment Acres by Vegetation Type (2021-2024)", fontsize=14, fontweight="bold", pad=20)
     adjust_chart_scaling(ax, veg_year_acres)
     ax.set_xlabel("Year", fontsize=12)
     ax.legend(title="Vegetation Type", bbox_to_anchor=(1.05, 1), loc="upper left")
@@ -377,7 +377,7 @@ def create_ownership_chart(df):
     ownership_year_acres = ownership_year_acres.clip(upper=np.percentile(ownership_year_acres, 95))
     fig, ax = plt.subplots(figsize=(14, 6))
     ownership_year_acres.plot(kind="bar", ax=ax, width=0.8, colormap="coolwarm")
-    ax.set_title("Treatment Acres by Land Ownership (2021-2023)", fontsize=14, fontweight="bold", pad=20)
+    ax.set_title("Treatment Acres by Land Ownership (2021-2024)", fontsize=14, fontweight="bold", pad=20)
     adjust_chart_scaling(ax, ownership_year_acres)
     ax.set_xlabel("Year", fontsize=12)
     ax.legend(title="Ownership", bbox_to_anchor=(1.05, 1), loc="upper left")
@@ -392,7 +392,7 @@ def create_status_chart(df):
     status_year_acres = status_year_acres.clip(upper=np.percentile(status_year_acres, 95))
     fig, ax = plt.subplots(figsize=(14, 6))
     status_year_acres.plot(kind="bar", stacked=True, ax=ax, width=0.8, colormap="coolwarm")
-    ax.set_title("Treatment Acres by Status (2021-2023)", fontsize=14, fontweight="bold", pad=20)
+    ax.set_title("Treatment Acres by Status (2021-2024)", fontsize=14, fontweight="bold", pad=20)
     adjust_chart_scaling(ax, status_year_acres)
     ax.set_xlabel("Year", fontsize=12)
     ax.legend(title="Status", bbox_to_anchor=(1.05, 1), loc="upper left")
@@ -592,7 +592,7 @@ def generate_excel_data(df, region_name):
     output.seek(0)
     return output
 
-@router.post("/its_geojson_region_report", include_in_schema=True)
+@router.post("/its_activity_report_for_geojson_20251027", include_in_schema=True)
 def create_geojson_region_report(
     request: RegionReportRequest = Body(...),
     db: Session = Depends(get_db)
@@ -1105,7 +1105,7 @@ def create_geojson_region_report(
              <h3>Administering Organizations</h3>
              <p class="table-description">
                    Breakdown of treatment acres by administering organization and activity type.
-                   Data reflects actual completed treatments from 2021-2023.
+                   Data reflects actual completed treatments from 2021-2024.
              </p>
              {{ admin_table|safe }}
              <h3>Land Ownership Details</h3>

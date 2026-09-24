@@ -1,0 +1,22 @@
+# Secrets: fastApi/.env is tracked as an empty template only; never commit real values
+*.env.local
+*.env~
+
+# Editor / backup files
+*~
+*.bak*
+routes/backup/
+
+# Python
+__pycache__/
+*.pyc
+
+# Binaries and data provided at deploy time (not source)
+*.so
+*.jar
+*.tif
+*.zip
+tif_vat_dbf_files/
+knowledge/
+regulations/
+data/

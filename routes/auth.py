@@ -11,7 +11,7 @@ from models.wfr_pydantic import Account
 from controller.db import SessionLocal, get_db
 from fastapi import Depends
 from sqlalchemy.orm import Session, joinedload
-from controller.manager import get_user_by_username, manager
+from controller.manager import get_user_by_username, get_user_by_email, manager
 import os
 import jwt
 import json
@@ -160,6 +160,140 @@ def send_verification_email(admin, user, access_token):
         )
     return result
 
+
+def send_verification_email_to_user(user, access_token):
+    result = send_email_via_sparcal(
+        to_email=user.email,	
+        subject=f"New Task Force Data Hub Account Verification Request",	
+        body=f"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Account Verification</title>
+    <style>
+        body {{
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }}
+        .container {{
+            max-width: 600px;
+            margin: 0 auto;
+            background-color: #ffffff;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }}
+        .header {{
+            background-color: #2c3e50;
+            color: white;
+            padding: 15px 20px;
+            border-radius: 6px;
+            margin-bottom: 25px;
+        }}
+        .section {{
+            margin-bottom: 25px;
+        }}
+        .label {{
+            font-weight: bold;
+            color: #2c3e50;
+            margin-bottom: 10px;
+            display: block;
+            font-size: 16px;
+        }}
+        .content {{
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 6px;
+            border: 1px solid #e9ecef;
+        }}
+        ul {{
+            list-style-type: none;
+            padding-left: 0;
+            margin: 0;
+        }}
+        li {{
+            margin-bottom: 10px;
+            padding-left: 10px;
+        }}
+        .field-label {{
+            color: #666;
+            width: 100px;
+            display: inline-block;
+        }}
+        .field-value {{
+            color: #333;
+            font-weight: 500;
+        }}
+        .verification-link {{
+            display: inline-block;
+            margin-top: 20px;
+            padding: 12px 24px;
+            background-color: lightgray;
+            color: white;
+            text-decoration: none;
+            border-radius: 4px;
+            font-weight: 500;
+        }}
+        .message {{
+            margin-bottom: 20px;
+            line-height: 1.6;
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h2 style="margin: 0;">New Account Verification Request</h2>
+        </div>
+        <div class="message">
+            <p>Hello {user.first_name},</p>
+            <p>A new account has been added to the Task Force Data Hub.</p>
+        </div>
+        <div class="section">
+            <span class="label">User Information</span>
+            <div class="content">
+                <ul>
+                    <li>
+                        <span class="field-label">Name:</span>
+                        <span class="field-value">{user.first_name} {user.last_name}</span>
+                    </li>
+                    <li>
+                        <span class="field-label">Username:</span>
+                        <span class="field-value">{user.username}</span>
+                    </li>
+                    <li>
+                        <span class="field-label">Email:</span>
+                        <span class="field-value">{user.email}</span>
+                    </li>
+                    <li>
+                        <span class="field-label">Agency:</span>
+                        <span class="field-value">{user.affiliation}</span>
+                    </li>
+                </ul>
+            </div>
+        </div>
+        <div class="section">
+            <span class="label">Verification Action</span>
+            <div class="content">
+                <p>To activiate this account, please click the link below:</p>
+                <a href="{base_url}/Auth/validate_account/{user.username}/{access_token}" 
+                   class="verification-link">
+                    Verify Account
+                </a>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
+              """
+        )
+    return result
 
 
 def send_approval_email(user):
@@ -405,7 +539,10 @@ def login(data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get
 
     user = get_user_by_username(username)
     if not user:
-        raise InvalidCredentialsException
+        user = get_user_by_email(username)
+        username = user.username
+        if not user:  
+            raise InvalidCredentialsException
     elif user.is_verified == False:
         raise HTTPException(status_code=500, detail='Account has not been verified')
     else:
@@ -428,6 +565,31 @@ def login(data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get
 
 @router.post("/user")
 async def user(data: Account, db: Session = Depends(get_db)):
+    
+    user = get_user_by_username(data.username)
+    if user != None:
+        raise HTTPException(status_code=500, detail='Username is already taken.')    
+
+    email_user = db.query(User).filter(User.email == data.email).first()                                                                                        
+    if email_user:                                                                                                                                              
+        raise HTTPException(status_code=400, detail='An account with the same email exists')    
+
+    LoginFunctions.create_user(data, db)
+    user = get_user_by_username(data.username)
+
+    access_token = manager.create_access_token(
+        data={'sub': user.username},
+        expires=(timedelta(days = 3))
+    )
+    send_verification_email_to_user(user, access_token)
+
+    # LoginFunctions.send_verification_email(user, access_token)
+    return {"status": 'success', "message": 
+            'Account Created.  You will receive an email to verify your email address.'}
+
+
+
+async def user2(data: Account, db: Session = Depends(get_db)):
     
     user = get_user_by_username(data.username)
     if user != None:

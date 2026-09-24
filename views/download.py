@@ -13,6 +13,13 @@ from fastapi.encoders import jsonable_encoder
 import datetime
 from models.wfr_database import User
 
+import traceback
+
+
+def debug_print(msg):
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    print(f"[{timestamp}] {msg}")
 
 
 router = APIRouter(
@@ -39,9 +46,17 @@ async def download_layer(layer_name: str, file_name: str, \
     
     vector_layer_name = None if vector_layer_name == 'undefined' else vector_layer_name
     vector_column_filter = None if vector_column_filter == 'undefined' else vector_column_filter
-        
-    downloadFunctions = DownloadLayerFunctions()
-    temp_path = await downloadFunctions.download_layer(layer_name, vector_layer_name, vector_column_filter)
+
+    debug_print(f"layer_name: {layer_name}")
+
+    try:        
+        downloadFunctions = DownloadLayerFunctions()
+        temp_path = await downloadFunctions.download_layer(layer_name, vector_layer_name, vector_column_filter)
+    except Exception as e:
+        traceback.print_exc()
+        raise e
+
+    debug_print(f"temp_path: {temp_path}")
 
     zip_path = DownloadLayerFunctions.compress_tif(temp_path, layer_name, file_name)
 

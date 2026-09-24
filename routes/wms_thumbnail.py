@@ -24,7 +24,8 @@ async def get_wms_thumbnail(
     min_x: float = Query(None, description="Minimum X coordinate of bounding box (EPSG:4326)"),
     min_y: float = Query(None, description="Minimum Y coordinate of bounding box (EPSG:4326)"),
     max_x: float = Query(None, description="Maximum X coordinate of bounding box (EPSG:4326)"),
-    max_y: float = Query(None, description="Maximum Y coordinate of bounding box (EPSG:4326)")
+    max_y: float = Query(None, description="Maximum Y coordinate of bounding box (EPSG:4326)"),
+    sld_style: str = Query(None, description="Optional SLD style name to apply to the WMS layer")
 ):
     """
     Generate a thumbnail with a WMS layer overlaid on OpenStreetMap.
@@ -46,7 +47,8 @@ async def get_wms_thumbnail(
             wms_url=wms_url,
             layer_name=layer_name,
             bbox=bbox,
-            image_size=(width, height)
+            image_size=(width, height),
+            sld_style=sld_style
         )
         
         # Return the image directly in the response
@@ -64,7 +66,7 @@ async def get_wms_thumbnail(
         logger.error(f"Error generating WMS thumbnail: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error generating WMS thumbnail: {str(e)}")
 
-def create_wms_overlay_bytes(wms_url, layer_name, bbox=None, image_size=(200, 200)):
+def create_wms_overlay_bytes(wms_url, layer_name, bbox=None, image_size=(200, 200), sld_style=None):
     """
     Create a thumbnail image that overlays a WMS layer on top of OpenStreetMap background.
     
@@ -79,6 +81,8 @@ def create_wms_overlay_bytes(wms_url, layer_name, bbox=None, image_size=(200, 20
         If None, the layer's default bounding box will be used
     image_size : tuple, optional
         Size of the output image as (width, height) in pixels
+    sld_style : str, optional
+        SLD style name to apply to the WMS layer
         
     Returns:
     --------
@@ -86,6 +90,8 @@ def create_wms_overlay_bytes(wms_url, layer_name, bbox=None, image_size=(200, 20
     """
     try:
         logger.info(f"Creating WMS overlay for layer {layer_name} from {wms_url}")
+        if sld_style:
+            logger.info(f"Using SLD style: {sld_style}")
         
         # Connect to the WMS service
         wms = WebMapService(wms_url)
@@ -117,9 +123,13 @@ def create_wms_overlay_bytes(wms_url, layer_name, bbox=None, image_size=(200, 20
         # Add the OpenStreetMap basemap
         ctx.add_basemap(ax, source=ctx.providers.OpenStreetMap.Mapnik)
         
+        # Prepare the styles parameter for the WMS request
+        styles = [sld_style] if sld_style else ['']
+        
         # Get the WMS image - request at higher resolution for better quality
         wms_img = wms.getmap(
             layers=[layer_name],
+            styles=styles,
             srs='EPSG:3857',
             bbox=(minx, miny, maxx, maxy),
             size=(max(400, image_size[0]*2), max(400, image_size[1]*2)),  # Higher resolution for better quality
@@ -165,4 +175,3 @@ def create_wms_overlay_bytes(wms_url, layer_name, bbox=None, image_size=(200, 20
         logger.error(f"Error in create_wms_overlay_bytes: {str(e)}")
         # Re-raise the exception to be caught by the calling function
         raise
-

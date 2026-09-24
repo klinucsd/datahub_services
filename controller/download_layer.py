@@ -14,6 +14,12 @@ from geojson import Polygon
 import geojson
 
 
+def debug_print(msg): 
+    from datetime import datetime 
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]                                                                                                
+    print(f"[{timestamp}] {msg}")    
+
+
 load_dotenv('fastapi/env')
 
 class DownloadLayerFunctions:
@@ -29,6 +35,9 @@ class DownloadLayerFunctions:
                               'boundary:cal_fire_operational_units': 'boundary:unit',
                               'boundary:california_state_senate_districts_map_2020': 'gml:name',
                               'boundary:assembly_districts': 'boundary:assemblydi',
+
+			      'boundary:wftf_regions_final_updated_july_2025': 'boundary:region',
+
                               }
         
         self.vector_layer_names = {
@@ -41,6 +50,8 @@ class DownloadLayerFunctions:
                               'boundary:cal_fire_operational_units' : 'CAL FIRE Operational Units',
                               'boundary:california_state_senate_districts_map_2020' : 'California State Senate Districts',
                               'boundary:assembly_districts' : 'California Assembly Districts',
+ 
+                              'boundary:wftf_regions_final_updated_july_2025': 'California Wildfire & Forest Resilience Task Force Region Boundaries',
                               }
 
     async def download_layer(self, layer_name, vector_layer_name = None, vector_column_filter = None):    
@@ -105,16 +116,23 @@ class DownloadLayerFunctions:
                 if full_extent[3] == None or box[3] > full_extent[3]:
                     full_extent[3] = box[3]
 
+            debug_print(f"full_extent: {full_extent}")
 
             # fetch raster cropped to vector bbox and save to temp
             raster_url = f'{geoserver_url}/ows?service=WCS&version=2.0.0&request=GetCoverage&coverageId={layer_name}&format=image/geotiff&SUBSET=X({full_extent[0]},{full_extent[2]})&SUBSET=Y({full_extent[1]},{full_extent[3]})&SubsettingCRS=http://www.opengis.net/def/crs/EPSG/0/3310'
             with tempfile.NamedTemporaryFile(delete=True, suffix='.tif') as tmp_tif:
                 tmp_tif_path = tmp_tif.name 
 
+            debug_print(f"raster_url: {raster_url}")
             response = requests.get(raster_url)
 
             if 'Empty intersection after subsetting' in str(response.content):
-                raise HTTPException(status_code=500, detail="The raster and subsetting vector do not overlap. Please choose a different filter.")
+
+                layer_name = f"oper:{layer_name}"
+                raster_url = f'{geoserver_url}/ows?service=WCS&version=2.0.0&request=GetCoverage&coverageId={layer_name}&format=image/geotiff&SUBSET=X({full_extent[0]},{full_extent[2]})&SUBSET=Y({full_extent[1]},{full_extent[3]})&SubsettingCRS=http://www.opengis.net/def/crs/EPSG/0/3310'
+                response = requests.get(raster_url)
+                if 'Empty intersection after subsetting' in str(response.content):
+                    raise HTTPException(status_code=500, detail="The raster and subsetting vector do not overlap. Please choose a different filter.")
 
             # Save the path to the temporary TIF file
             with open(tmp_tif_path, 'wb') as f:
@@ -147,7 +165,21 @@ class DownloadLayerFunctions:
         zip_path = file_name[:-4] + ".zip"
         zf = zipfile.ZipFile(zip_path, mode="w")
         try:
-            zf.write(file_path, file_name + '.tif', compress_type=zipfile.ZIP_DEFLATED)              
+            zf.write(file_path, file_name + '.tif', compress_type=zipfile.ZIP_DEFLATED)             
+
+            try:
+                layer_name_norm = layer_name.split(':')[1]
+                dbf_file_name = f"/code/tif_vat_dbf_files/{layer_name_norm}.tif.vat.dbf"
+                debug_print(f"dbf_file_name: {dbf_file_name}")
+                if os.path.exists(dbf_file_name):
+                    debug_print("DBF exists")
+                    zf.write(dbf_file_name, f"{file_name}.tif.vat.dbf", compress_type=zipfile.ZIP_DEFLATED)
+                    debug_print(f"Added DBF file to zip: {dbf_file_name}")	
+                else:	
+                    debug_print("DBF does not exist")
+            except:
+                pass             
+
         except FileNotFoundError:
             print("An error occurred")
         finally:

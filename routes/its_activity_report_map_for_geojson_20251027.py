@@ -95,11 +95,11 @@ def get_scatter_points(db: Session, region_gdf: gpd.GeoDataFrame):
            ST_Y(its.geom) AS lat,
            its.activity_quantity,
            its.year_txt
-       FROM its.activities_report_20250110 AS its, bbox, region_geom
+       FROM its.activity_report20251027 AS its, bbox, region_geom
        WHERE ST_Intersects(its.geom, bbox.geom)
          AND ST_Contains(region_geom.geom, its.geom)
          AND year_txt ~ '^[0-9]+$'
-         AND CAST(year_txt AS INTEGER) BETWEEN 2021 AND 2023;
+         AND CAST(year_txt AS INTEGER) BETWEEN 2021 AND 2024;
     """
     debug_print(query)
 
@@ -581,7 +581,7 @@ def create_region_map(db: Session, geojson_str: str = None, region_name: str = N
 
     # Plot scatter points
     if color_by_year and 'year_txt' in points_df.columns:
-        year_colors = {'2021': 'green', '2022': 'purple', '2023': 'blue'}
+        year_colors = {'2021': 'green', '2022': 'purple', '2023': 'blue', '2024': 'red'}
         unique_years = sorted([y for y in points_df['year_txt'].unique() if y in year_colors])
 
         for year in unique_years:
