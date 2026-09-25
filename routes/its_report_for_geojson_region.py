@@ -22,7 +22,6 @@ import io
 from io import BytesIO
 import markdown
 from dotenv.main import load_dotenv
-from openai import OpenAI
 import plotly.graph_objects as go
 import logging
 import traceback
